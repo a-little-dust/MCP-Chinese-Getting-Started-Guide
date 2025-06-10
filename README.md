@@ -1,14 +1,12 @@
 # Model Context Protocol(MCP) 编程极速入门
 
-
-
-[TOC]
-
 ## 简介
 
 模型上下文协议（MCP）是一个创新的开源协议，它重新定义了大语言模型（LLM）与外部世界的互动方式。MCP 提供了一种标准化方法，使任意大语言模型能够轻松连接各种数据源和工具，实现信息的无缝访问和处理。MCP 就像是 AI 应用程序的 USB-C 接口，为 AI 模型提供了一种标准化的方式来连接不同的数据源和工具。
 
 ![image-20250223214308430](.assets/image-20250223214308430.png)
+
+通过本文，学到了：创建MCP服务端；创建客户端，连接MCP；给cursor等连接上MCP
 
 MCP 有以下几个核心功能：
 
@@ -47,66 +45,6 @@ uv add "mcp[cli]" httpx openai
 
 然后我们来创建一个叫 `web_search.py` 文件，来实现我们的服务。MCP 为我们提供了2个对象：`mcp.server.FastMCP` 和 `mcp.server.Server`，`mcp.server.FastMCP` 是更高层的封装，我们这里就来使用它。
 
-```python
-import httpx
-from mcp.server import FastMCP
-
-# # 初始化 FastMCP 服务器
-app = FastMCP('web-search')
-```
-
-实现执行的方法非常简单，MCP 为我们提供了一个 `@mcp.tool()` 我们只需要将实现函数用这个装饰器装饰即可。函数名称将作为工具名称，参数将作为工具参数，并通过注释来描述工具与参数，以及返回值。
-
-这里我们直接使用智谱的接口，它这个接口不仅能帮我们搜索到相关的结果链接，并帮我们生成了对应链接中文章总结后的内容的，~~并且现阶段是免费的~~(目前已经开始收费，0.03元/次)，非常适合我们。
-
->官方文档：https://bigmodel.cn/dev/api/search-tool/web-search-pro
->
->API Key 生成地址：https://bigmodel.cn/usercenter/proj-mgmt/apikeys
-
-```python
-@app.tool()
-async def web_search(query: str) -> str:
-    """
-    搜索互联网内容
-
-    Args:
-        query: 要搜索内容
-
-    Returns:
-        搜索结果的总结
-    """
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            'https://open.bigmodel.cn/api/paas/v4/tools',
-            headers={'Authorization': '换成你自己的API KEY'},
-            json={
-                'tool': 'web-search-pro',
-                'messages': [
-                    {'role': 'user', 'content': query}
-                ],
-                'stream': False
-            }
-        )
-
-        res_data = []
-        for choice in response.json()['choices']:
-            for message in choice['message']['tool_calls']:
-                search_results = message.get('search_result')
-                if not search_results:
-                    continue
-                for result in search_results:
-                    res_data.append(result['content'])
-
-        return '\n\n\n'.join(res_data)
-```
-
-最后，我们来添加运行服务器的代码。
-
-```python
-if __name__ == "__main__":
-    app.run(transport='stdio')
-```
 
 ## 调试 MCP 服务器
 
@@ -150,220 +88,6 @@ mcp dev web_search.py
 
 ![image-20250223224052795](.assets/image-20250223224052795.png)
 
-## 开发 MCP 客户端
-
-首先，我们先来看看如何在客户端如何调用我们刚才开发的 MCP 服务器中的工具。
-
-```python
-import asyncio
-
-from mcp.client.stdio import stdio_client
-from mcp import ClientSession, StdioServerParameters
-
-# 为 stdio 连接创建服务器参数
-server_params = StdioServerParameters(
-    # 服务器执行的命令，这里我们使用 uv 来运行 web_search.py
-    command='uv',
-    # 运行的参数
-    args=['run', 'web_search.py'],
-    # 环境变量，默认为 None，表示使用当前环境变量
-    # env=None
-)
-
-
-async def main():
-    # 创建 stdio 客户端
-    async with stdio_client(server_params) as (stdio, write):
-        # 创建 ClientSession 对象
-        async with ClientSession(stdio, write) as session:
-            # 初始化 ClientSession
-            await session.initialize()
-
-            # 列出可用的工具
-            response = await session.list_tools()
-            print(response)
-
-            # 调用工具
-            response = await session.call_tool('web_search', {'query': '今天杭州天气'})
-            print(response)
-
-
-if __name__ == '__main__':
-    asyncio.run(main())
-
-```
-
-因为我们的python脚本需要在虚拟环境中才能运行，所以这里我们通过 `uv` 来启动我们的脚本。
-
-下面我们来通过一个小例子来看看如何让 `DeepSeek` 来调用我们 MCP 服务器中的方法。
-
-这里我们会用 `dotenv` 来管理我们相关的环境变量。.env 文件内容如下：
-
-```shell
-OPENAI_API_KEY=sk-89baxxxxxxxxxxxxxxxxxx
-OPENAI_BASE_URL=https://api.deepseek.com
-OPENAI_MODEL=deepseek-chat
-```
-
-首先我们来编写我们的 `MCPClient` 类。
-
-```python
-import json
-import asyncio
-import os
-from typing import Optional
-from contextlib import AsyncExitStack
-
-from openai import OpenAI
-from dotenv import load_dotenv
-
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-
-
-load_dotenv()
-
-
-class MCPClient:
-    def __init__(self):
-        self.session: Optional[ClientSession] = None
-        self.exit_stack = AsyncExitStack()
-        self.client = OpenAI()
-```
-
-然后我们添加 `connect_to_server` 方法来初始化我们的 MCP 服务器的 session。
-
-```python
-    async def connect_to_server(self):
-        server_params = StdioServerParameters(
-            command='uv',
-            args=['run', 'web_search.py'],
-            env=None
-        )
-
-        stdio_transport = await self.exit_stack.enter_async_context(
-            stdio_client(server_params))
-        stdio, write = stdio_transport
-        self.session = await self.exit_stack.enter_async_context(
-            ClientSession(stdio, write))
-
-        await self.session.initialize()
-```
-
-然后我们再实现一个用于调用 MCP 服务器的方法来处理和 DeepSeek 之间的交互。
-
-```python
-    async def process_query(self, query: str) -> str:
-        # 这里需要通过 system prompt 来约束一下大语言模型，
-        # 否则会出现不调用工具，自己乱回答的情况
-        system_prompt = (
-            "You are a helpful assistant."
-            "You have the function of online search. "
-            "Please MUST call web_search tool to search the Internet content before answering."
-            "Please do not lose the user's question information when searching,"
-            "and try to maintain the completeness of the question content as much as possible."
-            "When there is a date related question in the user's question," 
-            "please use the search function directly to search and PROHIBIT inserting specific time."
-        )
-        
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": query}
-        ]
-
-        # 获取所有 mcp 服务器 工具列表信息
-        response = await self.session.list_tools()
-        # 生成 function call 的描述信息
-        available_tools = [{
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.inputSchema
-            }
-        } for tool in response.tools]
-
-        # 请求 deepseek，function call 的描述信息通过 tools 参数传入
-        response = self.client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL"),
-            messages=messages,
-            tools=available_tools
-        )
-
-        # 处理返回的内容
-        content = response.choices[0]
-        if content.finish_reason == "tool_calls":
-            # 如何是需要使用工具，就解析工具
-            tool_call = content.message.tool_calls[0]
-            tool_name = tool_call.function.name
-            tool_args = json.loads(tool_call.function.arguments)
-
-            # 执行工具
-            result = await self.session.call_tool(tool_name, tool_args)
-            print(f"\n\n[Calling tool {tool_name} with args {tool_args}]\n\n")
-			
-            # 将 deepseek 返回的调用哪个工具数据和工具执行完成后的数据都存入messages中
-            messages.append(content.message.model_dump())
-            messages.append({
-                "role": "tool",
-                "content": result.content[0].text,
-                "tool_call_id": tool_call.id,
-            })
-
-            # 将上面的结果再返回给 deepseek 用于生产最终的结果
-            response = self.client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL"),
-                messages=messages,
-            )
-            return response.choices[0].message.content
-
-        return content.message.content
-```
-
-接着，我们来实现循环提问和最后退出后关闭session的操作。
-
-```python
-    async def chat_loop(self):
-        while True:
-            try:
-                query = input("\nQuery: ").strip()
-
-                if query.lower() == 'quit':
-                    break
-
-                response = await self.process_query(query)
-                print("\n" + response)
-
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-
-    async def cleanup(self):
-        """Clean up resources"""
-        await self.exit_stack.aclose()
-```
-
-最后，我们来完成运行这个客户端相关的代码
-
-```python
-async def main():
-    client = MCPClient()
-    try:
-        await client.connect_to_server()
-        await client.chat_loop()
-    finally:
-        await client.cleanup()
-
-
-if __name__ == "__main__":
-    import sys
-
-    asyncio.run(main())
-
-```
-
-这是一个最精简的代码，里面没有实现记录上下文消息等功能，只是为了用最简单的代码来了解如何通过大语言模型来调动 MCP 服务器。这里只演示了如何连接单服务器，如果你期望连接多个 MCP 服务器，无非就是循环一下 `connect_to_server` 中的代码，可以将他们封装成一个类，然后将所有的 MCP 服务器中的工具循环遍历生成一个大的 `available_tools`，然后在通过大语言模型的返回结果进行调用即可，这里就不再赘述了。
-> 可以参考官方案例：https://github.com/modelcontextprotocol/python-sdk/blob/main/examples/clients/simple-chatbot/mcp_simple_chatbot/main.py
 
 ## Sampling 讲解
 
@@ -384,6 +108,7 @@ app = FastMCP('file_server')
 @app.tool()
 async def delete_file(file_path: str):
     # 创建 SamplingMessage 用于触发 sampling callback 函数
+    # 获取当前会话，然后发送消息SamplingMessage，内容是 询问是否删除文件
     result = await app.get_context().session.create_message(
         messages=[
             SamplingMessage(
@@ -405,6 +130,7 @@ if __name__ == '__main__':
 ```
 
 这里最重要的就是需要通过`create_message`方法来创建一个 `SamplingMessage` 类型的 message，他会将这个 message 发送给 sampling callback 对应的函数中。
+每个消息类型都有对应的回调函数，函数的内容由客户端来定义
 
 接着，我们来创建客户端的代码：
 
@@ -424,14 +150,14 @@ from mcp.types import (
 server_params = StdioServerParameters(
     command='uv',
     args=['run', 'file_server.py'],
-)
+)#这里可以看出 这个文件运行的是客户端
 
 
-async def sampling_callback(
+async def sampling_callback(# 定义回调函数
         context: RequestContext[ClientSession, None],
         params: CreateMessageRequestParams,
 ):
-    # 获取工具发送的消息并显示给用户
+    # 获取工具发送的消息并显示给用户，通过input()接受用户的输入
     input_message = input(params.messages[0].content.text)
     # 将用户输入发送回工具
     return CreateMessageResult(
@@ -447,7 +173,7 @@ async def sampling_callback(
 
 async def main():
     async with stdio_client(server_params) as (stdio, write):
-        async with ClientSession(
+        async with ClientSession(#除了前面设置的标准输入、标准输出，还要给client设置回调函数
                 stdio, write,
                 # 设置 sampling_callback 对应的方法
                 sampling_callback=sampling_callback
@@ -466,7 +192,7 @@ if __name__ == '__main__':
 
 ```
 
-特别要注意的是，目前在工具里面打印的内容实际上使用 `stdio_client` 是无法显示到命令行窗口的。所以，我们调试的话，可以使用 `mcp.shared.memory.create_connected_server_and_client_session`。
+特别要注意的是，目前在工具里面打印的内容实际上使用 `stdio_client` 是无法显示到命令行窗口的。所以，我们调试的话，可以使用 `mcp.shared.memory.create_connected_server_and_client_session`来替代 stdio_client，这个函数可以创建一个内存中的连接，使得调试信息能够正常显示
 
 具体代码如下：
 
@@ -482,6 +208,7 @@ async def sampling_callback(context, params):
     ...
 
 async def main():
+    # 使用 create_connected_server_and_client_session 创建连接
     async with create_session(
         app._mcp_server,
         sampling_callback=sampling_callback
@@ -498,6 +225,8 @@ if __name__ == '__main__':
 
 
 ## Claude Desktop 加载 MCP Server
+
+Claude 桌面端是一个功能强大的 AI 助手应用程序，可以与 Claude AI 进行自然语言对话，可以加载自定义的 MCP 服务器
 
 因为后面的两个功能实际上都是为了提供给 Claude 桌面端用的，所以这里先说下如何加载我们自定义的 MCP Server 到 Claude 桌面端。
 
@@ -555,7 +284,7 @@ app = FastMCP('prompt_and_resources')
 @app.prompt('翻译专家')
 async def translate_expert(
         target_language: str = 'Chinese',
-) -> str:
+) -> str:#定义提示词模板，返回str
     return f'你是一个翻译专家，擅长将任何语言翻译成{target_language}。请翻译以下内容：'
 
 
@@ -566,7 +295,7 @@ if __name__ == '__main__':
 
 然后我们用上一节讲到的配置 Claude 桌面端 MCP 服务器的方法添加下我们的新 MCP 服务器。然后我们就可以点击右下角的图标开始使用啦。
 
-他会让我们设置一下我们传入的参数，然后他会在我们的聊天窗口上生成一个附件。
+他会让我们设置一下我们传入的参数，然后会把提示词 根据模板 得到txt文件，后续会根据txt来回答
 
 ![mcp001](.assets/mcp001-1740666812436-2.gif)
 
@@ -586,6 +315,7 @@ async def echo_resource():
     # 返回的是，当用户使用这个资源时，资源的内容
     return 'Echo!'
 
+# 通配符资源 - 根据参数返回不同的内容，有别于静态资源
 @app.resource('greeting://{name}')
 async def get_greeting(name):
     return f'Hello, {name}!'
@@ -673,7 +403,7 @@ from mcp.server.fastmcp import Context
 @dataclass
 # 初始化一个生命周期上下文对象
 class AppContext:
-    # 里面有一个字段用于存储请求历史
+    # 里面有一个字段用于存储请求历史，是字典类型
     histories: dict
 
 
@@ -685,7 +415,7 @@ async def app_lifespan(server):
         # 每次通信会把这个上下文通过参数传入工具
         yield AppContext(histories=histories)
     finally:
-        # 当 MCP 服务关闭时执行
+        # 当 MCP 服务关闭时执行，打印历史消息
         print(histories)
 
 
@@ -708,7 +438,7 @@ async def web_search(ctx: Context, query: str) -> str:
     Returns:
         搜索结果的总结
     """
-    # 如果之前问过同样的问题，就直接返回缓存
+    # 如果之前问过同样的问题、有这个key，就直接返回缓存
     histories = ctx.request_context.lifespan_context.histories
     if query in histories：
     	return histories[query]
@@ -763,7 +493,7 @@ from langgraph.prebuilt import create_react_agent
 from langchain_openai import ChatOpenAI
 model = ChatOpenAI(model="gpt-4o")
 
-server_params = StdioServerParameters(
+server_params = StdioServerParameters(#定义 启动mcp server的参数
     command='uv',
     args=['run', 'web_search.py'],
 )
@@ -772,10 +502,10 @@ async with stdio_client(server_params) as (read, write):
     async with ClientSession(read, write) as session:
         await session.initialize()
 
-        # 获取工具列表
+        # 基于MCP，获取工具列表（相关函数由langchain提供）
         tools = await load_mcp_tools(session)
 
-        # 创建并使用 ReAct agent
+        # 创建并使用 ReAct agent，传入tools
         agent = create_react_agent(model, tools)
         agent_response = await agent.ainvoke({'messages': '杭州今天天气怎么样？'})
 ```
@@ -787,6 +517,8 @@ async with stdio_client(server_params) as (read, write):
 ## DeepSeek + cline + 自定义MCP = 图文大师
 
 最后，我们来使用 VsCode 的 cline 插件，来通过 DeepSeek 和我们自定义的一个图片生成的 mcp 服务器来构建一个图文大师的应用。废话不多说，我们直接开始。
+
+Cline 是一个 VSCode 的 AI 编程助手插件，它集成了多个大语言模型，包括 DeepSeek 等，支持配置自定义的 MCP 服务器
 
 首先先来构建我们的图片生成的 mcp server，这里我们直接用 huggingface 上的 `FLUX.1-schnell` 模型，地址是：https://huggingface.co/spaces/black-forest-labs/FLUX.1-schnell 。这里我们不使用 `gradio_client` 库，而是会使用 `httpx` 手搓一个，因为使用 `gradio_client` 库可能会出现编码错误的bug。具体代码如下：
 
@@ -898,6 +630,11 @@ mcp dev image_server.py
 
 上面我们讲的都是如何使用本地的 MCP 服务，但是有时我们希望直接把 MCP 服务部署到云端来直接调用，就省去了本地下载启动的烦恼了。此时，我们就需要来使用 MCP 的 SSE 的协议来实现了。
 
+SSE 是一种服务器推送技术，允许服务器向客户端推送数据
+它是基于 HTTP 协议的单向通信机制
+服务器可以持续向客户端发送数据流，而客户端只需要保持连接即可
+优势：支持跨网络通信，可以把服务端部署到云服务器上，客户端不需要本地运行服务器
+
 此时，我们先来写 SSE 协议的 MCP 服务。实现起来很简单，只需要将我们最后的 `run` 命令中的 `transport` 参数设置为 `sse` 即可。下面还是以上面的网络搜索为例子，来实现一下 ，具体代码如下：
 
 ```python
@@ -947,7 +684,7 @@ async def web_search(query: str) -> str:
 
 
 if __name__ == "__main__":
-    app.run(transport='sse')
+    app.run(transport='sse')#核心改动
 
 ```
 
@@ -966,6 +703,7 @@ from mcp import ClientSession
 
 
 async def main():
+    # 连接到服务器，用with确保正确关闭
     async with sse_client('http://localhost:9000/sse') as streams:
         async with ClientSession(*streams) as session:
             await session.initialize()
@@ -986,6 +724,8 @@ if __name__ == '__main__':
 当然，我们也可以使用 `mcp dev sse_web_search.py` 的方式来测试。这里要注意的是，`Transport Type` 需要改成 `SSE`，然后下面填写我们的本地服务地址。
 
 ![image-20250406153106098](.assets/image-20250406153106098.png)
+
+下面的内容是关于 如何把MCP服务放到阿里云服务器，让我们能通过服务器地址来访问这个MCP服务，而不是访问本地的服务。这样其他人也可以使用
 
 当一切都测试没有问题后，我们就来将他通过 severless 的方式来部署到云端。这里我们选择的是阿里云的函数计算服务。首先我们先进入到阿里云的 `函数计算 FC 3.0` 的 `函数` 菜单，并点击 `创建函数` 来创建我们的服务。地址是：https://fcnext.console.aliyun.com/cn-hangzhou/functions
 
@@ -1040,6 +780,7 @@ from mcp import ClientSession
 
 
 async def main():
+    # 注意 这里只是把地址改变了
     async with sse_client('https://mcp-test-whhergsbso.cn-hangzhou.fcapp.run/sse') as streams:
         async with ClientSession(*streams) as session:
             await session.initialize()
